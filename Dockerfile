@@ -5,7 +5,7 @@ FROM golang:alpine
 WORKDIR /app
 
 # 🚨 THE FIX: Copy the module files FIRST
-COPY go.mod go.sum ./
+COPY go.mod ./
 
 # 🚨 THE FIX: Download all dependencies (like Gorilla WebSockets)
 RUN go mod download
