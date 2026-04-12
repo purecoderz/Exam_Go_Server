@@ -32,7 +32,7 @@ func main() {
 
 	// 1. The Wake-Up Endpoint
 	mux.HandleFunc("/api/ping", handleCORS(pingHandler))
-	
+
 	// 2. The Execution Engine Endpoint
 	mux.HandleFunc("/api/execute", handleCORS(executeCodeHandler))
 
@@ -52,7 +52,7 @@ func pingHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"awake", "message":"GOPHER_OS Engine is online"}`))
@@ -91,7 +91,7 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 
 	cmdArgs := append([]string{"run", "main.go"}, req.Args...)
 	cmd := exec.CommandContext(ctx, "go", cmdArgs...)
-	cmd.Dir = tmpDir 
+	cmd.Dir = tmpDir
 
 	var outBuf bytes.Buffer
 	var errBuf bytes.Buffer
@@ -107,11 +107,11 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		errMsg := errBuf.String()
-		
+
 		if ctx.Err() == context.DeadlineExceeded {
 			errMsg = "Execution Error: Time limit exceeded (5 seconds). Do you have an infinite loop?"
 		} else if errMsg == "" {
-			errMsg = err.Error() 
+			errMsg = err.Error()
 		}
 
 		// Clean up messy absolute paths from Go compiler errors
@@ -141,7 +141,7 @@ func sendError(w http.ResponseWriter, msg string) {
 // CORS Middleware
 func handleCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*") 
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		// Added GET to allowed methods for the ping endpoint
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")

@@ -1,21 +1,23 @@
-# Use the official Golang image so the 'go' command is available at runtime
-FROM golang:1.22-alpine
+# Start from the official Go image
+FROM golang:alpine
 
 # Set the working directory inside the container
 WORKDIR /app
 
-# Copy your Go server code into the container
-COPY main.go go.mod ./
+# 🚨 THE FIX: Copy the module files FIRST
+COPY go.mod go.sum ./
 
-# Build your API server
+# 🚨 THE FIX: Download all dependencies (like Gorilla WebSockets)
+RUN go mod download
+
+# Now copy the rest of your code (main.go)
+COPY . .
+
+# Build the application
 RUN go build -o server main.go
 
-# Add a non-root user for slight security improvement
-RUN adduser -D gopher
-USER gopher
+# Expose the port Render uses
+EXPOSE 3001
 
-# Expose the port Render expects
-EXPOSE 10000
-
-# Run the compiled server
+# Run the executable
 CMD ["./server"]
