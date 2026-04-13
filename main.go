@@ -72,30 +72,26 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 	// ==========================================
 	switch req.Mode {
 	case "single":
-		// Only main.go exists
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
 		runArgs = append([]string{"run", "main.go"}, req.Args...)
 
 	case "run":
-		// Playground: Student Main + Student Solution
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
 
 		solPath := filepath.Join(tmpDir, req.SolutionName)
 		os.WriteFile(solPath, []byte(req.StudentSolution), 0644)
-		
+
 		runArgs = append([]string{"run", "main.go", req.SolutionName}, req.Args...)
 
 	case "submit":
-		// Grading: Hidden Grader Main + Student Solution
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.HiddenMainCode), 0644)
 
 		solPath := filepath.Join(tmpDir, req.SolutionName)
 		os.WriteFile(solPath, []byte(req.StudentSolution), 0644)
-		
-		// Typically, graders don't take CLI args, they use internal tests
+
 		runArgs = []string{"run", "main.go", req.SolutionName}
 
 	default:
@@ -118,31 +114,39 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 
 	execErr := cmd.Run()
 
-	// Prepare response
 	response := ExecuteResponse{
 		Output: []string{},
 		Passed: false,
 	}
 
+	// 1. ALWAYS capture standard output, even if the program exited with an error
+	// (This catches your [FAIL] messages from the grader)
+	rawOutput := strings.TrimSpace(outBuf.String())
+	if rawOutput != "" {
+		response.Output = strings.Split(rawOutput, "\n")
+	}
+
+	// 2. Determine exactly what kind of error happened
 	if execErr != nil {
-		rawErr := errBuf.String()
+		rawErr := strings.TrimSpace(errBuf.String()) // Stderr (Compilation errors / Panics)
+
 		if ctx.Err() == context.DeadlineExceeded {
-			rawErr = "Timeout: Your code took too long to run (Infinite loop?)"
-		} else if rawErr == "" {
-			rawErr = execErr.Error()
+			// Case A: Infinite Loop
+			timeoutMsg := "Timeout: Your code took too long to run (Infinite loop?)"
+			response.Error = &timeoutMsg
+
+		} else if rawErr != "" {
+			// Case B: Real Compilation Error or Runtime Panic
+			cleanErr := strings.ReplaceAll(rawErr, tmpDir+"/", "")
+			response.Error = &cleanErr
+
+		} else {
+			// Case C: The test grader purposefully called os.Exit(1). 
+			// We DO NOT set response.Error here. We just leave Passed as false.
+			response.Passed = false
 		}
-		
-		// Clean up internal paths so student doesn't see /tmp/gopher_exec_...
-		cleanErr := strings.ReplaceAll(rawErr, tmpDir+"/", "")
-		response.Error = &cleanErr
 	} else {
-		// SUCCESS
-		rawOutput := strings.TrimSpace(outBuf.String())
-		if rawOutput != "" {
-			response.Output = strings.Split(rawOutput, "\n")
-		}
-		
-		// If mode was submit and we reached here without error, they passed!
+		// Program exited perfectly with status 0
 		if req.Mode == "submit" {
 			response.Passed = true
 		}
