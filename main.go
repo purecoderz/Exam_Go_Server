@@ -14,54 +14,40 @@ import (
 	"time"
 )
 
-// The JSON contract from React
+// 1. Updated Request Struct to match React Payload
 type ExecuteRequest struct {
-	TaskID string   `json:"taskId"`
-	Code   string   `json:"code"`
-	Args   []string `json:"args"`
+	TaskID          string   `json:"taskId"`
+	Mode            string   `json:"mode"`            // "single", "run", or "submit"
+	StudentMainCode string   `json:"studentMainCode"` // Used in single and run
+	StudentSolution string   `json:"studentSolution"` // Used in run and submit
+	HiddenMainCode  string   `json:"hiddenMainCode"`  // Used in submit
+	SolutionName    string   `json:"solutionName"`    // e.g., "solution.go"
+	Args            []string `json:"args"`
 }
 
-// The JSON contract going back to React
+// 2. Updated Response Struct
 type ExecuteResponse struct {
 	Output []string `json:"output"`
 	Error  *string  `json:"error"`
+	Passed bool     `json:"passed"` // Tells React if the submission was successful
 }
 
 func main() {
 	mux := http.NewServeMux()
-
-	// 1. The Wake-Up Endpoint
 	mux.HandleFunc("/api/ping", handleCORS(pingHandler))
-
-	// 2. The Execution Engine Endpoint
 	mux.HandleFunc("/api/execute", handleCORS(executeCodeHandler))
 
-	// Get port from Render, fallback to 8080 for local dev
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	fmt.Printf("GOPHER_OS Execution Engine running on port %s\n", port)
+	fmt.Printf("GOPHER_OS Engine Live on port %s\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
-// pingHandler responds instantly to wake up the Render instance
-func pingHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodOptions {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"awake", "message":"GOPHER_OS Engine is online"}`))
-}
-
-// executeCodeHandler compiles and runs the submitted Go code
 func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost && r.Method != http.MethodOptions {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	if r.Method == http.MethodOptions {
 		return
 	}
 
@@ -71,56 +57,94 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Create isolation
 	tmpDir, err := os.MkdirTemp("", "gopher_exec_*")
 	if err != nil {
 		sendError(w, "Failed to create execution environment")
 		return
 	}
-	// CLEANUP: Ensure the folder is deleted when the function finishes
 	defer os.RemoveAll(tmpDir)
 
-	filePath := filepath.Join(tmpDir, "main.go")
-	if err := os.WriteFile(filePath, []byte(req.Code), 0644); err != nil {
-		sendError(w, "Failed to write code to disk")
+	var runArgs []string
+
+	// ==========================================
+	// FILE SYSTEM SETUP BASED ON MODE
+	// ==========================================
+	switch req.Mode {
+	case "single":
+		// Only main.go exists
+		mainPath := filepath.Join(tmpDir, "main.go")
+		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
+		runArgs = append([]string{"run", "main.go"}, req.Args...)
+
+	case "run":
+		// Playground: Student Main + Student Solution
+		mainPath := filepath.Join(tmpDir, "main.go")
+		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
+
+		solPath := filepath.Join(tmpDir, req.SolutionName)
+		os.WriteFile(solPath, []byte(req.StudentSolution), 0644)
+		
+		runArgs = append([]string{"run", "main.go", req.SolutionName}, req.Args...)
+
+	case "submit":
+		// Grading: Hidden Grader Main + Student Solution
+		mainPath := filepath.Join(tmpDir, "main.go")
+		os.WriteFile(mainPath, []byte(req.HiddenMainCode), 0644)
+
+		solPath := filepath.Join(tmpDir, req.SolutionName)
+		os.WriteFile(solPath, []byte(req.StudentSolution), 0644)
+		
+		// Typically, graders don't take CLI args, they use internal tests
+		runArgs = []string{"run", "main.go", req.SolutionName}
+
+	default:
+		sendError(w, "Invalid execution mode")
 		return
 	}
 
-	// Set a strict timeout to prevent infinite loops (5 seconds)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// ==========================================
+	// EXECUTION
+	// ==========================================
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 
-	cmdArgs := append([]string{"run", "main.go"}, req.Args...)
-	cmd := exec.CommandContext(ctx, "go", cmdArgs...)
+	cmd := exec.CommandContext(ctx, "go", runArgs...)
 	cmd.Dir = tmpDir
 
-	var outBuf bytes.Buffer
-	var errBuf bytes.Buffer
+	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 
-	err = cmd.Run()
+	execErr := cmd.Run()
 
+	// Prepare response
 	response := ExecuteResponse{
 		Output: []string{},
-		Error:  nil,
+		Passed: false,
 	}
 
-	if err != nil {
-		errMsg := errBuf.String()
-
+	if execErr != nil {
+		rawErr := errBuf.String()
 		if ctx.Err() == context.DeadlineExceeded {
-			errMsg = "Execution Error: Time limit exceeded (5 seconds). Do you have an infinite loop?"
-		} else if errMsg == "" {
-			errMsg = err.Error()
+			rawErr = "Timeout: Your code took too long to run (Infinite loop?)"
+		} else if rawErr == "" {
+			rawErr = execErr.Error()
 		}
-
-		// Clean up messy absolute paths from Go compiler errors
-		cleanErr := strings.ReplaceAll(errMsg, tmpDir+"/", "")
+		
+		// Clean up internal paths so student doesn't see /tmp/gopher_exec_...
+		cleanErr := strings.ReplaceAll(rawErr, tmpDir+"/", "")
 		response.Error = &cleanErr
 	} else {
+		// SUCCESS
 		rawOutput := strings.TrimSpace(outBuf.String())
 		if rawOutput != "" {
 			response.Output = strings.Split(rawOutput, "\n")
+		}
+		
+		// If mode was submit and we reached here without error, they passed!
+		if req.Mode == "submit" {
+			response.Passed = true
 		}
 	}
 
@@ -128,29 +152,29 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// Helper to format HTTP errors into our JSON structure
+// --- HELPERS ---
+
+func pingHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"awake"}`))
+}
+
 func sendError(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
 	json.NewEncoder(w).Encode(ExecuteResponse{
-		Output: []string{},
-		Error:  &msg,
+		Error: &msg,
 	})
 }
 
-// CORS Middleware
 func handleCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		// Added GET to allowed methods for the ping endpoint
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-
 		next(w, r)
 	}
 }
