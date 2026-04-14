@@ -63,28 +63,38 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 	defer os.RemoveAll(tmpDir)
 
 	// ==========================================
-	// 1. FILE PREPARATION
+	// 1. FILE PREPARATION & MODULE INJECTION
 	// ==========================================
+	
+	// ⚡️ INJECT THE PRE-COMPILED LIBRARIES
+	// We read the go.mod and go.sum we created in the Dockerfile
+	// and drop them into this student's unique temp folder.
+	modData, err := os.ReadFile("/student_env/go.mod")
+	if err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "go.mod"), modData, 0644)
+	}
+	
+	sumData, err := os.ReadFile("/student_env/go.sum")
+	if err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "go.sum"), sumData, 0644)
+	}
+
 	var filesToBuild []string
 	var programArgs []string
 
 	switch req.Mode {
-	// 1. Student hits "Run" on a single-file task (e.g. Hello World)
 	case "single":
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
 		filesToBuild = []string{"main.go"}
 		programArgs = req.Args
 
-	// 2. Student hits "Submit" on a single-file task
-	// (Your new addition! No hidden grader attached.)
 	case "single_submit":
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
 		filesToBuild = []string{"main.go"}
-		programArgs = req.Args // Or hardcoded args if needed for tests
+		programArgs = req.Args
 
-	// 3. Student hits "Run" on a multi-file task (e.g. Array Summation)
 	case "run":
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
@@ -93,15 +103,13 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 		filesToBuild = []string{"main.go", req.SolutionName}
 		programArgs = req.Args
 
-	// 4. Student hits "Submit" on a multi-file task
-	// (Hidden Grader + Student Solution)
 	case "submit":
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.HiddenMainCode), 0644)
 		solPath := filepath.Join(tmpDir, req.SolutionName)
 		os.WriteFile(solPath, []byte(req.StudentSolution), 0644)
 		filesToBuild = []string{"main.go", req.SolutionName}
-		programArgs = []string{} 
+		programArgs = []string{}
 
 	default:
 		sendError(w, "Invalid execution mode")
@@ -132,7 +140,6 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 			msg := "Timeout: Compilation took too long."
 			response.Error = &msg
 		} else {
-			// Real syntax error (missing comma, unused variable, etc)
 			cleanErr := strings.ReplaceAll(strings.TrimSpace(buildErrBuf.String()), tmpDir+"/", "")
 			response.Error = &cleanErr
 		}
@@ -142,7 +149,6 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- STEP B: RUN ---
-	// Now we run the compiled binary directly. If this loops, the OS kills it instantly.
 	runCmd := exec.CommandContext(ctx, "./student_app", programArgs...)
 	runCmd.Dir = tmpDir
 
@@ -152,7 +158,6 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 
 	runErr := runCmd.Run()
 
-	// Capture output (prints and [FAIL] tags)
 	rawOutput := strings.TrimSpace(outBuf.String())
 	if rawOutput != "" {
 		response.Output = strings.Split(rawOutput, "\n")
@@ -160,17 +165,13 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 
 	if runErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			// THE INFINITE LOOP CATCHER
 			timeoutMsg := "Timeout: Your code took too long to run (Infinite loop?)"
 			response.Error = &timeoutMsg
 		} else {
-			// Since we aren't using "go run" anymore, there is no annoying "exit status 1" text!
 			rawErr := strings.TrimSpace(errBuf.String())
 			if rawErr != "" {
-				// Actual Runtime Crash (e.g. panic: index out of range)
 				response.Error = &rawErr
 			} else {
-				// No text in Stderr? That means the hidden grader called os.Exit(1).
 				response.Passed = false
 			}
 		}
@@ -202,7 +203,7 @@ func handleCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization") // 🛡️ Added Authorization here for future security!
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
