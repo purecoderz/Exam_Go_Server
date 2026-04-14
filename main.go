@@ -167,9 +167,16 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 			runCmd.Stderr = &errBuf
 
 			runErr := runCmd.Run()
-			rawOutput := strings.TrimSpace(outBuf.String())
+			
+			// 1. Get the RAW exact strings
+			rawActual := outBuf.String()
+			rawExpected := test.ExpectedOutput
 
-			// 1. Check for Crashes or Timeouts
+			// 2. Normalize line endings (CRLF to LF) to prevent Windows vs Linux false positives
+			cleanActual := strings.ReplaceAll(rawActual, "\r\n", "\n")
+			cleanExpected := strings.ReplaceAll(rawExpected, "\r\n", "\n")
+
+			// Check for Crashes or Timeouts
 			if runErr != nil {
 				allPassed = false
 				if ctx.Err() == context.DeadlineExceeded {
@@ -178,7 +185,7 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 				} else {
 					rawErr := strings.TrimSpace(errBuf.String())
 					if rawErr == "" {
-						rawErr = "Exit status 1" // Fallback if no specific error text is generated
+						rawErr = "Exit status 1"
 					}
 					crashMsg := fmt.Sprintf("Crash on Test %d: %s", i+1, rawErr)
 					response.Error = &crashMsg
@@ -186,10 +193,12 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 				break // Stop testing immediately
 			}
 
-			// 2. Compare Output
-			if rawOutput != test.ExpectedOutput {
+			// ⚡️ RUTHLESS STRICT COMPARE
+			if cleanActual != cleanExpected {
 				allPassed = false
-				failMsg := fmt.Sprintf("Test %d Failed.\nArgs: %v\nExpected: %q\nGot:      %q", i+1, test.Args, test.ExpectedOutput, rawOutput)
+				
+				// %q will wrap the output in double quotes and visually expose hidden newlines as \n
+				failMsg := fmt.Sprintf("Test %d Failed.\nArgs: %v\nExpected: %q\nGot:      %q", i+1, test.Args, cleanExpected, cleanActual)
 				response.Error = &failMsg
 				break // Stop testing immediately
 			}
