@@ -14,22 +14,20 @@ import (
 	"time"
 )
 
-// 1. Updated Request Struct to match React Payload
 type ExecuteRequest struct {
 	TaskID          string   `json:"taskId"`
-	Mode            string   `json:"mode"`            // "single", "run", or "submit"
-	StudentMainCode string   `json:"studentMainCode"` // Used in single and run
-	StudentSolution string   `json:"studentSolution"` // Used in run and submit
-	HiddenMainCode  string   `json:"hiddenMainCode"`  // Used in submit
-	SolutionName    string   `json:"solutionName"`    // e.g., "solution.go"
+	Mode            string   `json:"mode"`
+	StudentMainCode string   `json:"studentMainCode"`
+	StudentSolution string   `json:"studentSolution"`
+	HiddenMainCode  string   `json:"hiddenMainCode"`
+	SolutionName    string   `json:"solutionName"`
 	Args            []string `json:"args"`
 }
 
-// 2. Updated Response Struct
 type ExecuteResponse struct {
 	Output []string `json:"output"`
 	Error  *string  `json:"error"`
-	Passed bool     `json:"passed"` // Tells React if the submission was successful
+	Passed bool     `json:"passed"`
 }
 
 func main() {
@@ -57,7 +55,6 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create isolation
 	tmpDir, err := os.MkdirTemp("", "gopher_exec_*")
 	if err != nil {
 		sendError(w, "Failed to create execution environment")
@@ -65,34 +62,46 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	var runArgs []string
+	// ==========================================
+	// 1. FILE PREPARATION
+	// ==========================================
+	var filesToBuild []string
+	var programArgs []string
 
-	// ==========================================
-	// FILE SYSTEM SETUP BASED ON MODE
-	// ==========================================
 	switch req.Mode {
+	// 1. Student hits "Run" on a single-file task (e.g. Hello World)
 	case "single":
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
-		runArgs = append([]string{"run", "main.go"}, req.Args...)
+		filesToBuild = []string{"main.go"}
+		programArgs = req.Args
 
+	// 2. Student hits "Submit" on a single-file task
+	// (Your new addition! No hidden grader attached.)
+	case "single_submit":
+		mainPath := filepath.Join(tmpDir, "main.go")
+		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
+		filesToBuild = []string{"main.go"}
+		programArgs = req.Args // Or hardcoded args if needed for tests
+
+	// 3. Student hits "Run" on a multi-file task (e.g. Array Summation)
 	case "run":
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
-
 		solPath := filepath.Join(tmpDir, req.SolutionName)
 		os.WriteFile(solPath, []byte(req.StudentSolution), 0644)
+		filesToBuild = []string{"main.go", req.SolutionName}
+		programArgs = req.Args
 
-		runArgs = append([]string{"run", "main.go", req.SolutionName}, req.Args...)
-
+	// 4. Student hits "Submit" on a multi-file task
+	// (Hidden Grader + Student Solution)
 	case "submit":
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.HiddenMainCode), 0644)
-
 		solPath := filepath.Join(tmpDir, req.SolutionName)
 		os.WriteFile(solPath, []byte(req.StudentSolution), 0644)
-
-		runArgs = []string{"run", "main.go", req.SolutionName}
+		filesToBuild = []string{"main.go", req.SolutionName}
+		programArgs = []string{} 
 
 	default:
 		sendError(w, "Invalid execution mode")
@@ -100,53 +109,72 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ==========================================
-	// EXECUTION
+	// 2. THE TWO-STEP EXECUTION PROCESS
 	// ==========================================
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "go", runArgs...)
-	cmd.Dir = tmpDir
-
-	var outBuf, errBuf bytes.Buffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
-
-	execErr := cmd.Run()
 
 	response := ExecuteResponse{
 		Output: []string{},
 		Passed: false,
 	}
 
-	// 1. ALWAYS capture standard output, even if the program exited with an error
-	// (This catches your [FAIL] messages from the grader)
+	// --- STEP A: COMPILE ---
+	buildArgs := append([]string{"build", "-o", "student_app"}, filesToBuild...)
+	buildCmd := exec.CommandContext(ctx, "go", buildArgs...)
+	buildCmd.Dir = tmpDir
+
+	var buildErrBuf bytes.Buffer
+	buildCmd.Stderr = &buildErrBuf
+
+	if err := buildCmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			msg := "Timeout: Compilation took too long."
+			response.Error = &msg
+		} else {
+			// Real syntax error (missing comma, unused variable, etc)
+			cleanErr := strings.ReplaceAll(strings.TrimSpace(buildErrBuf.String()), tmpDir+"/", "")
+			response.Error = &cleanErr
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	// --- STEP B: RUN ---
+	// Now we run the compiled binary directly. If this loops, the OS kills it instantly.
+	runCmd := exec.CommandContext(ctx, "./student_app", programArgs...)
+	runCmd.Dir = tmpDir
+
+	var outBuf, errBuf bytes.Buffer
+	runCmd.Stdout = &outBuf
+	runCmd.Stderr = &errBuf
+
+	runErr := runCmd.Run()
+
+	// Capture output (prints and [FAIL] tags)
 	rawOutput := strings.TrimSpace(outBuf.String())
 	if rawOutput != "" {
 		response.Output = strings.Split(rawOutput, "\n")
 	}
 
-	// 2. Determine exactly what kind of error happened
-	if execErr != nil {
-		rawErr := strings.TrimSpace(errBuf.String()) // Stderr (Compilation errors / Panics)
-
+	if runErr != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			// Case A: Infinite Loop
+			// THE INFINITE LOOP CATCHER
 			timeoutMsg := "Timeout: Your code took too long to run (Infinite loop?)"
 			response.Error = &timeoutMsg
-
-		} else if rawErr != "" {
-			// Case B: Real Compilation Error or Runtime Panic
-			cleanErr := strings.ReplaceAll(rawErr, tmpDir+"/", "")
-			response.Error = &cleanErr
-
 		} else {
-			// Case C: The test grader purposefully called os.Exit(1). 
-			// We DO NOT set response.Error here. We just leave Passed as false.
-			response.Passed = false
+			// Since we aren't using "go run" anymore, there is no annoying "exit status 1" text!
+			rawErr := strings.TrimSpace(errBuf.String())
+			if rawErr != "" {
+				// Actual Runtime Crash (e.g. panic: index out of range)
+				response.Error = &rawErr
+			} else {
+				// No text in Stderr? That means the hidden grader called os.Exit(1).
+				response.Passed = false
+			}
 		}
 	} else {
-		// Program exited perfectly with status 0
 		if req.Mode == "submit" {
 			response.Passed = true
 		}
