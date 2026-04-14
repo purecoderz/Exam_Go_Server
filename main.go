@@ -14,14 +14,21 @@ import (
 	"time"
 )
 
+// ⚡️ NEW: TestCase Struct for grading
+type TestCase struct {
+	Args           []string `json:"args"`
+	ExpectedOutput string   `json:"expectedOutput"`
+}
+
 type ExecuteRequest struct {
-	TaskID          string   `json:"taskId"`
-	Mode            string   `json:"mode"`
-	StudentMainCode string   `json:"studentMainCode"`
-	StudentSolution string   `json:"studentSolution"`
-	HiddenMainCode  string   `json:"hiddenMainCode"`
-	SolutionName    string   `json:"solutionName"`
-	Args            []string `json:"args"`
+	TaskID          string     `json:"taskId"`
+	Mode            string     `json:"mode"`
+	StudentMainCode string     `json:"studentMainCode"`
+	StudentSolution string     `json:"studentSolution"`
+	HiddenMainCode  string     `json:"hiddenMainCode"`
+	SolutionName    string     `json:"solutionName"`
+	Args            []string   `json:"args"`
+	Tests           []TestCase `json:"tests"` // ⚡️ NEW: Array of tests from frontend
 }
 
 type ExecuteResponse struct {
@@ -66,9 +73,6 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 	// 1. FILE PREPARATION & MODULE INJECTION
 	// ==========================================
 	
-	// ⚡️ INJECT THE PRE-COMPILED LIBRARIES
-	// We read the go.mod and go.sum we created in the Dockerfile
-	// and drop them into this student's unique temp folder.
 	modData, err := os.ReadFile("/student_env/go.mod")
 	if err == nil {
 		os.WriteFile(filepath.Join(tmpDir, "go.mod"), modData, 0644)
@@ -80,7 +84,7 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var filesToBuild []string
-	var programArgs []string
+	var programArgs []string // Used for standard "run" or "single" modes
 
 	switch req.Mode {
 	case "single":
@@ -93,7 +97,7 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 		mainPath := filepath.Join(tmpDir, "main.go")
 		os.WriteFile(mainPath, []byte(req.StudentMainCode), 0644)
 		filesToBuild = []string{"main.go"}
-		programArgs = req.Args
+		// We don't set programArgs here because we will loop through req.Tests later
 
 	case "run":
 		mainPath := filepath.Join(tmpDir, "main.go")
@@ -149,35 +153,83 @@ func executeCodeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- STEP B: RUN ---
-	runCmd := exec.CommandContext(ctx, "./student_app", programArgs...)
-	runCmd.Dir = tmpDir
+	
+	// ⚡️ BRANCH 1: Multi-Test Grading (Single Submit)
+	if req.Mode == "single_submit" {
+		allPassed := true
 
-	var outBuf, errBuf bytes.Buffer
-	runCmd.Stdout = &outBuf
-	runCmd.Stderr = &errBuf
+		for i, test := range req.Tests {
+			runCmd := exec.CommandContext(ctx, "./student_app", test.Args...)
+			runCmd.Dir = tmpDir
 
-	runErr := runCmd.Run()
+			var outBuf, errBuf bytes.Buffer
+			runCmd.Stdout = &outBuf
+			runCmd.Stderr = &errBuf
 
-	rawOutput := strings.TrimSpace(outBuf.String())
-	if rawOutput != "" {
-		response.Output = strings.Split(rawOutput, "\n")
-	}
+			runErr := runCmd.Run()
+			rawOutput := strings.TrimSpace(outBuf.String())
 
-	if runErr != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			timeoutMsg := "Timeout: Your code took too long to run (Infinite loop?)"
-			response.Error = &timeoutMsg
-		} else {
-			rawErr := strings.TrimSpace(errBuf.String())
-			if rawErr != "" {
-				response.Error = &rawErr
-			} else {
-				response.Passed = false
+			// 1. Check for Crashes or Timeouts
+			if runErr != nil {
+				allPassed = false
+				if ctx.Err() == context.DeadlineExceeded {
+					timeoutMsg := fmt.Sprintf("Timeout on Test %d: Infinite loop?", i+1)
+					response.Error = &timeoutMsg
+				} else {
+					rawErr := strings.TrimSpace(errBuf.String())
+					if rawErr == "" {
+						rawErr = "Exit status 1" // Fallback if no specific error text is generated
+					}
+					crashMsg := fmt.Sprintf("Crash on Test %d: %s", i+1, rawErr)
+					response.Error = &crashMsg
+				}
+				break // Stop testing immediately
+			}
+
+			// 2. Compare Output
+			if rawOutput != test.ExpectedOutput {
+				allPassed = false
+				failMsg := fmt.Sprintf("Test %d Failed.\nArgs: %v\nExpected: %q\nGot:      %q", i+1, test.Args, test.ExpectedOutput, rawOutput)
+				response.Error = &failMsg
+				break // Stop testing immediately
 			}
 		}
+
+		response.Passed = allPassed
+
+	// ⚡️ BRANCH 2: Standard Execution (Run / Single / Hidden Submit Graders)
 	} else {
-		if req.Mode == "submit" {
-			response.Passed = true
+		runCmd := exec.CommandContext(ctx, "./student_app", programArgs...)
+		runCmd.Dir = tmpDir
+
+		var outBuf, errBuf bytes.Buffer
+		runCmd.Stdout = &outBuf
+		runCmd.Stderr = &errBuf
+
+		runErr := runCmd.Run()
+
+		rawOutput := strings.TrimSpace(outBuf.String())
+		if rawOutput != "" {
+			response.Output = strings.Split(rawOutput, "\n")
+		}
+
+		if runErr != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				timeoutMsg := "Timeout: Your code took too long to run (Infinite loop?)"
+				response.Error = &timeoutMsg
+			} else {
+				rawErr := strings.TrimSpace(errBuf.String())
+				if rawErr != "" {
+					response.Error = &rawErr
+				} else {
+					// Silent fail (Hidden grader called os.Exit(1) without printing to stderr)
+					response.Passed = false
+				}
+			}
+		} else {
+			if req.Mode == "submit" {
+				response.Passed = true
+			}
 		}
 	}
 
@@ -203,7 +255,7 @@ func handleCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization") // 🛡️ Added Authorization here for future security!
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
