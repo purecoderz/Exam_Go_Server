@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	
 )
 
 // ⚡️ NEW: TestCase Struct for grading
@@ -44,7 +45,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "3001"
 	}
 
 	fmt.Printf("GOPHER_OS Engine Live on port %s\n", port)
